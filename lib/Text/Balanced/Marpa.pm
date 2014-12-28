@@ -162,7 +162,7 @@ has text =>
 	required => 0,
 );
 
-our $VERSION = '1.00';
+our $VERSION = '1.01';
 
 # ------------------------------------------------
 
@@ -297,9 +297,9 @@ sub next_few_chars
 
 sub node2string
 {
-	my($self, $options, $t, $vert_dashes) = @_;
-	my($depth)         = $t -> depth;
-	my($sibling_count) = defined $t -> is_root ? 1 : scalar $t -> parent -> children;
+	my($self, $options, $is_last_node, $node, $vert_dashes) = @_;
+	my($depth)         = $node -> depth;
+	my($sibling_count) = defined $node -> is_root ? 1 : scalar $node -> parent -> children;
 	my($offset)        = ' ' x 4;
 	my(@indent)        = map{$$vert_dashes[$_] || $offset} 0 .. $depth - 1;
 	@$vert_dashes      =
@@ -308,7 +308,9 @@ sub node2string
 		($sibling_count == 0 ? $offset : '   |'),
 	);
 
-	return join('', @indent[1 .. $#indent]) . ($depth ? '   |--- ' : '') . $self -> format_node($options, $t);
+	$indent[1] = '    ' if ($is_last_node && ($depth > 1) );
+
+	return join('', @indent[1 .. $#indent]) . ($depth ? '   |--- ' : '') . $self -> format_node($options, $node);
 
 } # End of node2string.
 
@@ -343,27 +345,20 @@ sub parse
 	{
 		if (defined (my $value = $self -> _process) )
 		{
-			print "Parsed text:\n" if ($self -> options & print_warnings);
 		}
 		else
 		{
 			$result = 1;
 
-			print "Error: Parse failed\nText parsed so far:\n";
+			print "Error: Parse failed\n";
 		}
 	}
 	catch
 	{
 		$result = 1;
 
-		print "Error: Parse failed. ${_}Text parsed so far:\n";
+		print "Error: Parse failed. ${_}";
 	};
-
-	if ($self -> options & print_warnings)
-	{
-		print join("\n", @{$self -> tree2string}), "\n";
-		print "Parse result: $result (0 is success)\n";
-	}
 
 	# Return 0 for success and 1 for failure.
 
@@ -430,7 +425,7 @@ sub _process
 		$original_lexeme           = $lexeme;
 		$pos                       = $self -> recce -> lexeme_read($event_name);
 
-		die "Error: lexeme_read($event_name) rejected lexeme |$lexeme|\n" if (! defined $pos);
+		die "lexeme_read($event_name) rejected lexeme |$lexeme|\n" if (! defined $pos);
 
 		print sprintf($format, $event_name, $start, $span, $pos, $lexeme, '-') if ($self -> options & debug);
 
@@ -461,7 +456,7 @@ sub _process
 				$self -> error_message($message);
 				$self -> error_number(1);
 
-				die "Error: $message\n" if ($self -> options & overlap_is_fatal);
+				die "$message\n" if ($self -> options & overlap_is_fatal);
 
 				# If we did not die, then it's a warning message.
 
@@ -487,7 +482,7 @@ sub _process
 				$self -> error_message($message);
 				$self -> error_number(2);
 
-				die "Error: $message\n" if ($self -> options & nesting_is_fatal);
+				die "$message\n" if ($self -> options & nesting_is_fatal);
 
 				# If we did not die, then it's a warning message.
 
@@ -532,7 +527,7 @@ sub _process
 
 		if ($self -> options & ambiguity_is_fatal)
 		{
-			die "Error: $message\n";
+			die "$message\n";
 		}
 		elsif ($self -> options & print_warnings)
 		{
@@ -580,13 +575,14 @@ sub tree2string
 	$options                   ||= {};
 	$$options{no_attributes}   ||= 0;
 	$tree                      ||= $self -> tree;
+	my(@nodes)                 = $tree -> traverse;
 
 	my(@out);
 	my(@vert_dashes);
 
-	for my $node ($tree -> traverse)
+	for my $i (0 .. $#nodes)
 	{
-		push @out, $self -> node2string($options, $node, \@vert_dashes);
+		push @out, $self -> node2string($options, $i == $#nodes, $nodes[$i], \@vert_dashes);
 	}
 
 	return [@out];
@@ -616,7 +612,7 @@ sub _validate_event
 
 	for (@event_name)
 	{
-		die "Error: Unexpected event name '$_'" if (! ${$self -> known_events}{$_});
+		die "Unexpected event name '$_'" if (! ${$self -> known_events}{$_});
 	}
 
 	if ($event_count > 1)
@@ -650,7 +646,7 @@ sub _validate_event
 		}
 		else
 		{
-			die "Error: The code only handles 1 event at a time, or a few special cases. \n";
+			die "The code only handles 1 event at a time, or a few special cases. \n";
 		}
 	}
 
@@ -666,8 +662,8 @@ sub validate_open_close
 	my($open)  = $self -> open;
 	my($close) = $self -> close;
 
-	die "Error: There must be at least 1 pair of open/close delimiters\n"    if ( ($#$open < 0) || ($#$close < 0) );
-	die "Error: The # of open delimiters must match # of close delimiters\n" if ($#$open != $#$close);
+	die "There must be at least 1 pair of open/close delimiters\n"    if ( ($#$open < 0) || ($#$close < 0) );
+	die "The # of open delimiters must match # of close delimiters\n" if ($#$open != $#$close);
 
 	my(%substitute)         = (close => '', delim => '', open => '');
 	my($matching_delimiter) = {};
@@ -688,7 +684,7 @@ sub validate_open_close
 			$self -> error_message($message);
 			$self -> error_number(4);
 
-			die "Error: $message\n";
+			die "$message\n";
 		}
 
 		if ( ( (length($$open[$i]) > 1) && ($$open[$i] =~ /'/) ) || ( (length($$close[$i]) > 1) && ($$close[$i] =~ /'/) ) )
@@ -698,7 +694,7 @@ sub validate_open_close
 			$self -> error_message($message);
 			$self -> error_number(5);
 
-			die "Error: $message\n";
+			die "$message\n";
 		}
 
 		$seen{open}{$$open[$i]}   = 0 if (! $seen{open}{$$open[$i]});
@@ -806,6 +802,9 @@ C<Text::Balanced::Marpa> - Extract delimited text sequences from strings
 
 		$result = $parser -> parse(\$text);
 
+		print join("\n", @{$parser -> tree2string}), "\n";
+		print "Parse result: $result (0 is success)\n";
+
 		if ($count == 3)
 		{
 			print "Deliberate error: Failed to parse |$text|\n";
@@ -842,12 +841,12 @@ This is the printout of synopsis.pl:
 	Parse result: 0 (0 is success)
 	--------------------------------------------------
 	Parsing |a <: b <: c :> d :> e|
-	Error: Parse failed. Error: Opened delimiter <: again before closing previous one
+	Error: Parse failed. Opened delimiter <: again before closing previous one
 	Text parsed so far:
 	root. Attributes: {}
 	   |--- string. Attributes: {text => "a "}
 	   |--- open. Attributes: {text => "<:"}
-	   |   |--- string. Attributes: {text => " b "}
+	       |--- string. Attributes: {text => " b "}
 	Parse result: 1 (0 is success)
 	Deliberate error: Failed to parse |a <: b <: c :> d :> e|
 	Error number: 2. Error message: Opened delimiter <: again before closing previous one
@@ -1082,9 +1081,7 @@ This message can never be just a warning message.
 
 See L</error_message()>.
 
-=head2 format_node($options, [$node])
-
-Here, [] represent an optional parameter.
+=head2 format_node($options, $node)
 
 Returns a string consisting of the node's name and, optionally, it's attributes.
 
@@ -1102,17 +1099,17 @@ Default: 0 (include attributes).
 
 Calls L</hashref2string($hashref)>.
 
-Called by L</node2string($options, [$node])>.
+Called by L</node2string($options, $is_last_node, $node, $vert_dashes)>.
 
 You would not normally call this method.
 
-If you don't wish to supply options, use format_node({}, $node).
+If you don't wish to supply options, set option to {}.
 
 =head2 hashref2string($hashref)
 
 Returns the given hashref as a string.
 
-Called by L</format_node($options, [$node])>.
+Called by L</format_node($options, $node)>.
 
 =head2 known_events()
 
@@ -1141,7 +1138,7 @@ Get or set the number of characters called 'the next few chars', which are print
 
 'next_few_limit' is a parameter to L</new()>. See L</Constructor and Initialization> for details.
 
-=head2 node2string($options, $t, $vert_dashes)
+=head2 node2string($options, $is_last_node, $node, $vert_dashes)
 
 Returns a string of the node's name and attributes, with a leading indent, suitable for printing.
 
@@ -1157,7 +1154,9 @@ Default: 0 (include attributes).
 
 =back
 
-Calls L</format_node($options, [$node])>.
+Ignore the parameter $vert_dashes. The code uses it as temporary storage.
+
+Calls L</format_node($options, $node)>.
 
 Called by L</tree2string($options, [$some_tree])>.
 
@@ -1223,7 +1222,9 @@ See scripts/traverse.pl for sample code which processes this tree's nodes.
 
 Here, the [] represent an optional parameter.
 
-Returns an arrayref of lines, suitable for printing.
+If $some_tree is not supplied, uses the calling object's tree ($self -> tree).
+
+Returns an arrayref of lines, suitable for printing. These lines do not end in "\n".
 
 Draws a nice ASCII-art representation of the tree structure.
 
@@ -1253,7 +1254,7 @@ The tree looks like:
 	   |   |--- F. Attributes: {# => "8"}
 	   |       |--- G. Attributes: {# => "8"}
 	   |--- B. Attributes: {# => "9"}
-	   |   |--- C. Attributes: {# => "9"}
+	       |--- C. Attributes: {# => "9"}
 
 Or, without attributes:
 
@@ -1281,9 +1282,9 @@ Or, without attributes:
 	   |   |--- F
 	   |       |--- G
 	   |--- B
-	   |   |--- C
+	       |--- C
 
-See scripts/traverse.pl.
+See scripts/samples.pl.
 
 Example usage:
 
@@ -1305,7 +1306,7 @@ Default: 0 (include attributes).
 
 =back
 
-Calls L</node2string($options, $t, $vert_dashes)>.
+Calls L</node2string($options, $is_last_node, $node, $vert_dashes)>.
 
 =head1 FAQ
 
@@ -1383,17 +1384,13 @@ It's value is 1.
 
 =item o print_warnings
 
-Print various warnings if this flag is set.
-
-This printout includes:
+Print various warnings if this flag is set:
 
 =over 4
 
-=item o The tree representing the parse at the end of the run, successful or otherwise
-
-=item o The parse result (0 => success, 1 => failure)
-
 =item o The ambiguity status and terminals expected, if the parse is ambiguous
+
+=item o See L</error_number()> for other warnings which might be printed
 
 Ambiguity is not, in and of itself, an error. But see the C<ambiguity_is_fatal> option, below.
 
@@ -1431,6 +1428,10 @@ This triggers a call to 'die' if the parse is ambiguous.
 It's value is 16.
 
 =back
+
+=head2 How do I print the tree built by the parser?
+
+See L</Synopsis>.
 
 =head2 How do I make use of the tree built by the parser?
 
