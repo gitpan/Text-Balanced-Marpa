@@ -12,21 +12,30 @@ use Text::Balanced::Marpa;
 my($count)  = 0;
 my($parser) = Text::Balanced::Marpa -> new
 (
-	open  => ['"'],
-	close => ['"'],
+	open  => ['{'],
+	close => ['}'],
+);
+my(@prefix) =
+(
+	'Skip me ->',
+	"I've already parsed up to here ->",
 );
 my(@text) =
 (
-	q||,
-	q|a|,
-	q|"a"|,
-	q|a "b "c" d" e|,
-	q|a 'b "c" d' e|,
+	q|a {b} c|,
+	q|a {b {c} d} e|,
 );
 
-for my $text (@text)
+my($text);
+
+for my $i (0 .. $#text)
 {
 	$count++;
+
+	$text = $prefix[$i] . $text[$i];
+
+	$parser -> pos(length $prefix[$i]);
+	$parser -> length(length($text) - $parser -> pos);
 
 	ok($parser -> parse(\$text) == 0, "Parsed: $text");
 

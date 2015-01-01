@@ -1,7 +1,10 @@
 #!/usr/bin/env perl
 
 use strict;
+use utf8;
 use warnings;
+use warnings qw(FATAL utf8); # Fatalize encoding glitches.
+use open     qw(:std :utf8); # Undeclared streams in UTF-8.
 
 use Test::More;
 
@@ -12,23 +15,25 @@ use Text::Balanced::Marpa;
 my($count)  = 0;
 my($parser) = Text::Balanced::Marpa -> new
 (
-	open  => ['"'],
-	close => ['"'],
+	open        => ['{'],
+	close       => ['}'],
+	escape_char => '%',
 );
 my(@text) =
 (
-	q||,
-	q|a|,
-	q|"a"|,
-	q|a "b "c" d" e|,
-	q|a 'b "c" d' e|,
+	q|{%{a%}} \{\b\} {} %%|,
+	q|a {b} c %{%} {\d}|,
 );
+
+my($result);
 
 for my $text (@text)
 {
 	$count++;
 
-	ok($parser -> parse(\$text) == 0, "Parsed: $text");
+	$result = $parser -> parse(\$text);
+
+	ok($result == 0, "Parsed: $text");
 
 	#diag join("\n", @{$parser -> tree2string});
 }

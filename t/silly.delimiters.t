@@ -26,9 +26,11 @@ for my $text (@text)
 {
 	$count++;
 
-	ok($parser -> parse(\$text) == 0, "Parsed $text");
+	ok($parser -> parse(\$text) == 0, "Parsed: $text");
 
 	#diag join("\n", @{$parser -> tree2string});
 }
+
+print "# Internal test count: $count\n";
 
 done_testing($count);

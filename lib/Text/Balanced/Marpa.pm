@@ -8,12 +8,13 @@ use open     qw(:std :utf8); # Undeclared streams in UTF-8.
 
 use Const::Exporter constants =>
 [
-	nothing_is_fatal   =>  0, # The default.
-	debug              =>  1,
-	print_warnings     =>  2,
-	overlap_is_fatal   =>  4,
-	nesting_is_fatal   =>  8,
-	ambiguity_is_fatal => 16,
+	nothing_is_fatal    =>  0, # The default.
+	debug               =>  1,
+	print_warnings      =>  2,
+	overlap_is_fatal    =>  4,
+	nesting_is_fatal    =>  8,
+	ambiguity_is_fatal  => 16,
+	exhaustion_is_fatal => 32,
 ];
 
 use Marpa::R2;
@@ -82,6 +83,14 @@ has error_number =>
 	required => 0,
 );
 
+has escape_char =>
+(
+	default  => sub{return '\\'},
+	is       => 'rw',
+	isa      => Str,
+	required => 0,
+);
+
 has grammar =>
 (
 	default  => sub {return ''},
@@ -98,11 +107,27 @@ has known_events =>
 	required => 0,
 );
 
+has length =>
+(
+	default  => sub{return 0},
+	is       => 'rw',
+	isa      => Int,
+	required => 0,
+);
+
 has matching_delimiter =>
 (
 	default  => sub{return {} },
 	is       => 'rw',
 	isa      => HashRef,
+	required => 0,
+);
+
+has next_few_limit =>
+(
+	default  => sub{return 20},
+	is       => 'rw',
+	isa      => Int,
 	required => 0,
 );
 
@@ -130,9 +155,9 @@ has options =>
 	required => 0,
 );
 
-has next_few_limit =>
+has pos =>
 (
-	default  => sub{return 20},
+	default  => sub{return 0},
 	is       => 'rw',
 	isa      => Int,
 	required => 0,
@@ -162,7 +187,7 @@ has text =>
 	required => 0,
 );
 
-our $VERSION = '1.01';
+our $VERSION = '1.02';
 
 # ------------------------------------------------
 
@@ -199,7 +224,7 @@ delimiter_char			~ [_delimiter_]
 :lexeme					~ close_delim		pause => before		event => close_delim
 _close_
 
-escaped_char			~ '\' delimiter_char	# Use ' in comment for UltraEdit.
+escaped_char			~ '_escape_char_' delimiter_char	# Use ' in comment for UltraEdit.
 
 # Warning: Do not add '+' to this set, even though it speeds up things.
 # The problem is that the set then gobbles up any '\', so the following
@@ -216,10 +241,25 @@ text					~ escaped_char
 							| non_quote_char
 END_OF_GRAMMAR
 
-	my($hashref) = $self -> validate_open_close;
-	$bnf         =~ s/_open_/$$hashref{open}/;
-	$bnf         =~ s/_close_/$$hashref{close}/;
-	$bnf         =~ s/_delimiter_/$$hashref{delim}/g;
+	my($hashref)     = $self -> _validate_open_close;
+	$bnf             =~ s/_open_/$$hashref{open}/;
+	$bnf             =~ s/_close_/$$hashref{close}/;
+	$bnf             =~ s/_delimiter_/$$hashref{delim}/g;
+	my($escape_char) = $self -> escape_char;
+
+	if ($escape_char eq "'")
+	{
+		my($message) = 'Single-quote is forbidden as an escape character';
+
+		$self -> error_message($message);
+		$self -> error_number(7);
+
+		# This 'die' is not inside try {}catch{}, so we add the prefix 'Error: '.
+
+		die "Error: $message\n";
+	}
+
+	$bnf =~ s/_escape_char_/$escape_char/g;
 
 	$self -> bnf($bnf);
 	$self -> grammar
@@ -229,6 +269,9 @@ END_OF_GRAMMAR
 			source => \$self -> bnf
 		})
 	);
+
+	# This hash does not contain the key "'exhausted" because the exhaustion
+	# event is everywhere handled explicitly. Yes, it has a leading quote.
 
 	my(%event);
 
@@ -325,9 +368,9 @@ sub parse
 	(
 		Marpa::R2::Scanless::R -> new
 		({
-			grammar          => $self -> grammar,
-			ranking_method   => 'high_rule_only',
-			#trace_terminals => $self -> trace_terminals,
+			exhaustion     => 'event',
+			grammar        => $self -> grammar,
+			ranking_method => 'high_rule_only',
 		})
 	);
 
@@ -340,6 +383,8 @@ sub parse
 	# Return 0 for success and 1 for failure.
 
 	my($result) = 0;
+
+	my($message);
 
 	try
 	{
@@ -384,12 +429,14 @@ sub _pop_node_stack
 sub _process
 {
 	my($self)               = @_;
-	my($stringref)          = $self -> text || ''; # Allow for undef.
-	my($length)             = length $$stringref;
+	my($stringref)          = $self -> text || \''; # Allow for undef. Use ' in comment for UltraEdit.
+	my($pos)                = $self -> pos;
+	my($first_pos)          = $pos;
+	my($total_length)       = length($$stringref);
+	my($length)             = $self -> length || $total_length;
 	my($text)               = '';
 	my($format)             = "%-20s    %5s    %5s    %5s    %-20s    %-20s\n";
 	my($last_event)         = '';
-	my($pos)                = 0;
 	my($matching_delimiter) = $self -> matching_delimiter;
 
 	if ($self -> options & debug)
@@ -409,11 +456,12 @@ sub _process
 
 	# We use read()/lexeme_read()/resume() because we pause at each lexeme.
 	# Also, in read(), we use $pos and $length to avoid reading Ruby Slippers tokens (if any).
+	# For the latter, see scripts/match.parentheses.02.pl in MarpaX::Demo::SampleScripts.
 
 	for
 	(
 		$pos = $self -> recce -> read($stringref, $pos, $length);
-		$pos < $length;
+		($pos < $total_length) && ( ($pos - $first_pos) <= $length);
 		$pos = $self -> recce -> resume($pos)
 	)
 	{
@@ -421,9 +469,15 @@ sub _process
 		$delimiter_stack           = $self -> delimiter_stack;
 		($start, $span)            = $self -> recce -> pause_span;
 		($event_name, $span, $pos) = $self -> _validate_event($stringref, $start, $span, $pos, $delimiter_frequency);
-		$lexeme                    = $self -> recce -> literal($start, $span);
-		$original_lexeme           = $lexeme;
-		$pos                       = $self -> recce -> lexeme_read($event_name);
+
+		# If the input is exhausted, we exit immediately so we don't try to use
+		# the values of $start, $span or $pos. They are ignored upon exit.
+
+		last if ($event_name eq "'exhausted"); # Yes, it has a leading quote.
+
+		$lexeme          = $self -> recce -> literal($start, $span);
+		$original_lexeme = $lexeme;
+		$pos             = $self -> recce -> lexeme_read($event_name);
 
 		die "lexeme_read($event_name) rejected lexeme |$lexeme|\n" if (! defined $pos);
 
@@ -456,6 +510,8 @@ sub _process
 				$self -> error_message($message);
 				$self -> error_number(1);
 
+				# This 'die' is inside try{}catch{}, which adds the prefix 'Error: '.
+
 				die "$message\n" if ($self -> options & overlap_is_fatal);
 
 				# If we did not die, then it's a warning message.
@@ -481,6 +537,8 @@ sub _process
 
 				$self -> error_message($message);
 				$self -> error_number(2);
+
+				# This 'die' is inside try {}catch{}, which adds the prefix 'Error: '.
 
 				die "$message\n" if ($self -> options & nesting_is_fatal);
 
@@ -516,7 +574,27 @@ sub _process
 
 	$self -> _save_text($text);
 
-	if (my $status = $self -> recce -> ambiguous)
+	if ($self -> recce -> exhausted)
+	{
+		$message = 'Parse exhausted';
+
+		$self -> error_message($message);
+		$self -> error_number(6);
+
+		if ($self -> options & exhaustion_is_fatal)
+		{
+			# This 'die' is inside try {}catch{}, which adds the prefix 'Error: '.
+
+			die "$message\n";
+		}
+		else
+		{
+			$self -> error_number(-6);
+
+			print "Warning: $message\n" if ($self -> options & print_warnings);
+		}
+	}
+	elsif (my $status = $self -> recce -> ambiguous)
 	{
 		my($terminals) = $self -> recce -> terminals_expected;
 		$terminals     = ['(None)'] if ($#$terminals < 0);
@@ -527,13 +605,15 @@ sub _process
 
 		if ($self -> options & ambiguity_is_fatal)
 		{
+			# This 'die' is inside try {}catch{}, which adds the prefix 'Error: '.
+
 			die "$message\n";
 		}
 		elsif ($self -> options & print_warnings)
 		{
 			$self -> error_number(-3);
 
-			print "$message\n";
+			print "Warning: $message\n";
 		}
 	}
 
@@ -594,10 +674,19 @@ sub tree2string
 sub _validate_event
 {
 	my($self, $stringref, $start, $span, $pos, $delimiter_frequency) = @_;
-	my(@event)         = @{$self -> recce -> events};
-	my($event_count)   = scalar @event;
-	my(@event_name)    = sort map{$$_[0]} @event;
-	my($event_name)    = $event_name[0]; # Default.
+	my(@event)       = @{$self -> recce -> events};
+	my($event_count) = scalar @event;
+	my(@event_name)  = sort map{$$_[0]} @event;
+	my($event_name)  = $event_name[0]; # Default.
+
+	# If the input is exhausted, we return immediately so we don't try to use
+	# the values of $start, $span or $pos. They are ignored upon return.
+
+	if ($event_name eq "'exhausted") # Yes, it has a leading quote.
+	{
+		return ($event_name, $span, $pos);
+	}
+
 	my($lexeme)        = substr($$stringref, $start, $span);
 	my($line, $column) = $self -> recce -> line_column($start);
 	my($literal)       = $self -> next_few_chars($stringref, $start + $span);
@@ -612,7 +701,17 @@ sub _validate_event
 
 	for (@event_name)
 	{
-		die "Unexpected event name '$_'" if (! ${$self -> known_events}{$_});
+		if (! ${$self -> known_events}{$_})
+		{
+			$message = "Unexpected event name '$_'";
+
+			$self -> error_message($message);
+			$self -> error_number(10);
+
+			# This 'die' is inside try {}catch{}, which adds the prefix 'Error: '.
+
+			die "$message\n";
+		}
 	}
 
 	if ($event_count > 1)
@@ -646,7 +745,15 @@ sub _validate_event
 		}
 		else
 		{
-			die "The code only handles 1 event at a time, or a few special cases. \n";
+			$message = join(', ', @event_name);
+			$message = "The code does not handle these events simultaneously: $message";
+
+			$self -> error_message($message);
+			$self -> error_number(11);
+
+			# This 'die' is inside try {}catch{}, which adds the prefix 'Error: '.
+
+			die "$message\n";
 		}
 	}
 
@@ -656,14 +763,37 @@ sub _validate_event
 
 # ------------------------------------------------
 
-sub validate_open_close
+sub _validate_open_close
 {
 	my($self)  = @_;
 	my($open)  = $self -> open;
 	my($close) = $self -> close;
 
-	die "There must be at least 1 pair of open/close delimiters\n"    if ( ($#$open < 0) || ($#$close < 0) );
-	die "The # of open delimiters must match # of close delimiters\n" if ($#$open != $#$close);
+	my($message);
+
+	if ( ($#$open < 0) || ($#$close < 0) )
+	{
+		$message = 'There must be at least 1 pair of open/close delimiters';
+
+		$self -> error_message($message);
+		$self -> error_number(8);
+
+		# This 'die' is not inside try {}catch{}, so we add the prefix 'Error: '.
+
+		die "Error: $message\n";
+	}
+
+	if ($#$open != $#$close)
+	{
+		$message = 'The # of open delimiters must match the # of close delimiters';
+
+		$self -> error_message($message);
+		$self -> error_number(9);
+
+		# This 'die' is not inside try {}catch{}, so we add the prefix 'Error: '.
+
+		die "Error: $message\n";
+	}
 
 	my(%substitute)         = (close => '', delim => '', open => '');
 	my($matching_delimiter) = {};
@@ -671,7 +801,6 @@ sub validate_open_close
 
 	my($close_quote);
 	my(%delimiter_action, %delimiter_frequency);
-	my($message);
 	my($open_quote);
 	my($prefix, %prefix);
 
@@ -684,7 +813,9 @@ sub validate_open_close
 			$self -> error_message($message);
 			$self -> error_number(4);
 
-			die "$message\n";
+			# This 'die' is not inside try {}catch{}, so we add the prefix 'Error: '.
+
+			die "Error: $message\n";
 		}
 
 		if ( ( (length($$open[$i]) > 1) && ($$open[$i] =~ /'/) ) || ( (length($$close[$i]) > 1) && ($$close[$i] =~ /'/) ) )
@@ -694,7 +825,9 @@ sub validate_open_close
 			$self -> error_message($message);
 			$self -> error_number(5);
 
-			die "$message\n";
+			# This 'die' is not inside try {}catch{}, so we add the prefix 'Error: '.
+
+			die "Error: $message\n";
 		}
 
 		$seen{open}{$$open[$i]}   = 0 if (! $seen{open}{$$open[$i]});
@@ -755,7 +888,7 @@ sub validate_open_close
 
 	return \%substitute;
 
-} # End of validate_open_close.
+} # End of _validate_open_close.
 
 # ------------------------------------------------
 
@@ -895,6 +1028,10 @@ In the same vein, see t/angle.brackets.t, for code where the delimiters are just
 
 See t/multiple.delimiters.t.
 
+=item o Skipping (leading) characters in the input string
+
+See t/skip.prefix.t.
+
 =item o Implementing hard-to-read text strings as delimiters
 
 See t/silly.delimiters.
@@ -957,6 +1094,16 @@ A value for this option is mandatory.
 
 Default: None.
 
+=item o length => $integer
+
+The maxiumum length of the input string to process.
+
+This parameter works in conjunction with the C<pos> parameter.
+
+See the L</FAQ> for details.
+
+Default: Calls Perl's length() function on the input string.
+
 =item o next_few_limit => $integer
 
 This controls how many characters are printed when displaying 'the next few chars'.
@@ -983,7 +1130,19 @@ This allows you to turn on various options.
 
 Default: 0 (nothing is fatal).
 
-See L</FAQ> for details.
+See the L</FAQ> for details.
+
+=item o pos => $integer
+
+The offset within the input string at which to start processing.
+
+This parameter works in conjunction with the C<length> parameter.
+
+See the L</FAQ> for details.
+
+Note: The first character in the input string is at pos == 0.
+
+Default: 0.
 
 =item o text => $a_reference_to_the_string_to_be_parsed
 
@@ -1034,13 +1193,14 @@ Returns the last error or warning number set.
 
 Warnings have values < 0, and errors have values > 0.
 
-If the value is > 0, the code calls 'die', and the message has the prefix 'Error: '.
+If the value is > 0, the message has the prefix 'Error: ', and if the value is < 0, it has the
+prefix 'Warning: '. If this is not the case, it's a reportable bug.
 
-Current values:
+Possible values for error_number() and error_message():
 
 =over 4
 
-=item o 0 => Successful parse
+=item o 0 => ""
 
 This is the default value.
 
@@ -1077,9 +1237,49 @@ L<Marpa's DSL|https://metacpan.org/pod/distribution/Marpa-R2/pod/Scanless/DSL.po
 
 This message can never be just a warning message.
 
+=item o 6/-6 => "Parse exhausted"
+
+If L</error_number()> returns 6, it's an error, and if it returns -6 it's a warning.
+
+You can set the option C<exhaustion_is_fatal> to make it fatal.
+
+=item o 7 => 'Single-quote is forbidden as an escape character'
+
+This limitation is due to the syntax of
+L<Marpa's DSL|https://metacpan.org/pod/distribution/Marpa-R2/pod/Scanless/DSL.pod>.
+
+This message can never be just a warning message.
+
+=item o 8 => "There must be at least 1 pair of open/close delimiters"
+
+This message can never be just a warning message.
+
+=item o 9 => "The # of open delimiters must match the # of close delimiters"
+
+This message can never be just a warning message.
+
+=item o 10 => "Unexpected event name 'xyz'"
+
+Marpa has trigged an event and it's name is not in the hash of event names derived from the BNF.
+
+This message can never be just a warning message.
+
+=item o 11 => "The code does not handle these events simultaneously: a, b, ..."
+
+The code is written to handle single events at a time, or in rare cases, 2 events at the same time.
+But here, multiple events have been triggered and the code cannot handle the given combination.
+
+This message can never be just a warning message.
+
 =back
 
 See L</error_message()>.
+
+=head2 escape_char([$char])
+
+Here, the [] indicate an optional parameter.
+
+Get or set the escape char.
 
 =head2 format_node($options, $node)
 
@@ -1103,7 +1303,7 @@ Called by L</node2string($options, $is_last_node, $node, $vert_dashes)>.
 
 You would not normally call this method.
 
-If you don't wish to supply options, set option to {}.
+If you don't wish to supply options, use format_node({}, $node).
 
 =head2 hashref2string($hashref)
 
@@ -1114,6 +1314,16 @@ Called by L</format_node($options, $node)>.
 =head2 known_events()
 
 Returns a hashref where the keys are event names and the values are 1.
+
+=head2 length([$integer])
+
+Here, the [] indicate an optional parameter.
+
+Get or set the length of the input string to process.
+
+See also the L</FAQ> and L</pos([$integer])>.
+
+'length' is a parameter to L</new()>. See L</Constructor and Initialization> for details.
 
 =head2 matching_delimiter()
 
@@ -1178,7 +1388,7 @@ Get or set the option flags.
 
 For typical usage, see scripts/synopsis.pl.
 
-See L</FAQ> for details.
+See the L</FAQ> for details.
 
 'options' is a parameter to L</new()>. See L</Constructor and Initialization> for details.
 
@@ -1201,6 +1411,16 @@ See scripts/samples.pl.
 Returns 0 for success and 1 for failure.
 
 If the value is 1, you should call L</error_number()> to find out what happened.
+
+=head2 pos([$integer])
+
+Here, the [] indicate an optional parameter.
+
+Get or set the offset within the input string at which to start processing.
+
+See also the L</FAQ> and L</length([$integer])>.
+
+'pos' is a parameter to L</new()>. See L</Constructor and Initialization> for details.
 
 =head2 text([$stringref])
 
@@ -1326,6 +1546,23 @@ The backslash is preserved in the output.
 
 See t/escapes.t.
 
+=head2 How do the length and pos parameters to new() work?
+
+The recognizer - an object of type Marpa::R2::Scanless::R - is called in a loop, like this:
+
+	for
+	(
+		$pos = $self -> recce -> read($stringref, $pos, $length);
+		$pos < $length;
+		$pos = $self -> recce -> resume($pos)
+	)
+
+L</pos([$integer])> and L</length([$integer]) can be used to initialize $pos and $length.
+
+Note: The first character in the input string is at pos == 0.
+
+See L<https://metacpan.org/pod/distribution/Marpa-R2/pod/Scanless/R.pod#read> for details.
+
 =head2 Does this package support Unicode/UTF8?
 
 Yes. See t/escapes.t, t/multiple.quotes.t and t/utf8.t.
@@ -1363,7 +1600,9 @@ Firstly, to make these constants available, you must say:
 
 	use Text::Balanced::Marpa ':constants';
 
-Secondly, for usage of these option flags, see t/angle.brackets.t, t/colons.t, t/escapes.t,
+Secondly, more detail on errors and warnings can be found at L</error_number()>.
+
+Thirdly, for usage of these option flags, see t/angle.brackets.t, t/colons.t, t/escapes.t,
 t/multiple.quotes.t, t/percents.t and scripts/samples.pl.
 
 Now the flags themselves:
@@ -1423,9 +1662,15 @@ It's value is 8.
 
 =item o ambiguity_is_fatal
 
-This triggers a call to 'die' if the parse is ambiguous.
+This makes L</error_number()> return 3 rather than -3.
 
 It's value is 16.
+
+=item o exhaustion_is_fatal
+
+This makes L</error_number()> return 6 rather than -6.
+
+It's value is 32.
 
 =back
 
@@ -1512,6 +1757,10 @@ See L<https://jeffreykegler.github.io/Ocean-of-Awareness-blog/individual/2014/11
 
 Perhaps this could be a sub-class?
 
+=item o I8N support for error messages
+
+=item o An explicit test program for parse exhaustion
+
 =back
 
 =head1 See Also
@@ -1519,6 +1768,8 @@ Perhaps this could be a sub-class?
 L<Text::Balanced>.
 
 L<Tree> and L<Tree::Persist>.
+
+L<MarpaX::Demo::SampleScripts> - for various usages of L<Marpa::R2>, but not of this module.
 
 =head1 Machine-Readable Change Log
 
