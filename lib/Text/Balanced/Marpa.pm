@@ -187,7 +187,7 @@ has text =>
 	required => 0,
 );
 
-our $VERSION = '1.02';
+our $VERSION = '1.03';
 
 # ------------------------------------------------
 
@@ -447,7 +447,6 @@ sub _process
 
 	my($delimiter_frequency, $delimiter_stack);
 	my($event_name);
-	my(@fields);
 	my($lexeme);
 	my($message);
 	my($original_lexeme);
@@ -941,7 +940,8 @@ C<Text::Balanced::Marpa> - Extract delimited text sequences from strings
 		if ($count == 3)
 		{
 			print "Deliberate error: Failed to parse |$text|\n";
-			print 'Error number: ', $parser -> error_number, '. Error message: ', $parser -> error_message, "\n";
+			print 'Error number: ', $parser -> error_number, '. Error message: ',
+					$parser -> error_message, "\n";
 		}
 
 		print '-' x 50, "\n";
@@ -1179,7 +1179,7 @@ The value is incremented for each opening delimiter and decremented for each clo
 
 =head2 error_message()
 
-Returns the last error or warning message set when the code died.
+Returns the last error or warning message set.
 
 Error messages always start with 'Error: '. Messages never end with "\n".
 
@@ -1275,11 +1275,9 @@ This message can never be just a warning message.
 
 See L</error_message()>.
 
-=head2 escape_char([$char])
+=head2 escape_char()
 
-Here, the [] indicate an optional parameter.
-
-Get or set the escape char.
+Get the escape char.
 
 =head2 format_node($options, $node)
 
@@ -1467,14 +1465,6 @@ The tree looks like:
 	   |           |--- M. Attributes: {# => "5"}
 	   |               |--- N. Attributes: {# => "5"}
 	   |                   |--- O. Attributes: {# => "5"}
-	   |--- D. Attributes: {# => "6"}
-	   |   |--- F. Attributes: {# => "8"}
-	   |       |--- G. Attributes: {# => "8"}
-	   |--- E. Attributes: {# => "7"}
-	   |   |--- F. Attributes: {# => "8"}
-	   |       |--- G. Attributes: {# => "8"}
-	   |--- B. Attributes: {# => "9"}
-	       |--- C. Attributes: {# => "9"}
 
 Or, without attributes:
 
@@ -1495,14 +1485,6 @@ Or, without attributes:
 	   |           |--- M
 	   |               |--- N
 	   |                   |--- O
-	   |--- D
-	   |   |--- F
-	   |       |--- G
-	   |--- E
-	   |   |--- F
-	   |       |--- G
-	   |--- B
-	       |--- C
 
 See scripts/samples.pl.
 
@@ -1544,6 +1526,9 @@ chars and I<all> the colons in the text.
 
 The backslash is preserved in the output.
 
+If you don't want to use backslash for escaping, or can't, you can pass a different escape character
+to L</new()>.
+
 See t/escapes.t.
 
 =head2 How do the length and pos parameters to new() work?
@@ -1557,7 +1542,7 @@ The recognizer - an object of type Marpa::R2::Scanless::R - is called in a loop,
 		$pos = $self -> recce -> resume($pos)
 	)
 
-L</pos([$integer])> and L</length([$integer]) can be used to initialize $pos and $length.
+L</pos([$integer])> and L</length([$integer])> can be used to initialize $pos and $length.
 
 Note: The first character in the input string is at pos == 0.
 
@@ -1571,14 +1556,16 @@ Yes. See t/escapes.t, t/multiple.quotes.t and t/utf8.t.
 
 See t/perl.delimiters.t.
 
-=head2 Warning: calling open() and close() after calling new
+=head2 Warning: Calling mutators after calling new()
 
-Don't do that.
+The only mutator which works after calling new() is L</text([$stringref])>.
 
-To make the code work, you would have to manually call L</validate_open_close()>. But even then
+In particular, you can't call L</escape_char()>, L</open()> or L</close()> after calling L</new()>.
+This is because parameters passed to C<new()> are interpolated into the grammar before parsing
+begins. And that's why the docs for those methods all say 'Get the...' and not 'Get and set the...'.
+
+To make the code work, you would have to manually call _validate_open_close(). But even then
 a lot of things would have to be re-initialized to give the code any hope of working.
-
-And that raises the question: Should the tree of text parsed so far be destroyed and re-initialized?
 
 =head2 What is the format of the 'open' and 'close' parameters to new()?
 
@@ -1773,7 +1760,7 @@ L<MarpaX::Demo::SampleScripts> - for various usages of L<Marpa::R2>, but not of 
 
 =head1 Machine-Readable Change Log
 
-The file CHANGES was converted into Changelog.ini by L<Module::Metadata::Changes>.
+The file Changes was converted into Changelog.ini by L<Module::Metadata::Changes>.
 
 =head1 Version Numbers
 
